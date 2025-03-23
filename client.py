@@ -16,7 +16,7 @@ class ChessClient:
         threading.Thread(target=self.receive_moves).start()        
         while True:
             move = input("Enter your move (e.g., e2-e4): ")
-            client_socket.send(move.encode('utf-8'))
+            self.client_socket.send(move.encode('utf-8'))
 
 client = ChessClient()
 client.start_game()
