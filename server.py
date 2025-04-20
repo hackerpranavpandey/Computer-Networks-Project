@@ -1,646 +1,795 @@
-# ######## server.py code ########
+# ######## server.py (Multi-Game Version with Framing - Complete) ########
 import socket
 import threading
 import pickle
-import time # <-- Import time module
-from datetime import datetime # <-- Keep for chat timestamps
+import time
+from datetime import datetime
+import uuid # Using UUID for more robust game IDs
+import struct # For message framing
 
 # --- Constants ---
-INITIAL_TIME_SECONDS = 1200.0 # 20 minutes * 60 seconds/minute
+INITIAL_TIME_SECONDS = 1200.0 # 20 minutes
 BROADCAST_INTERVAL = 1.0 # Seconds between state broadcasts for timer updates
+SERVER_IP = '0.0.0.0'
+PORT = 5555
+MAX_PLAYERS_OVERALL = 10 # Max connections server will handle
+MAX_PLAYERS_PER_GAME = 2
+HEADER_SIZE = struct.calcsize('>I') # Size of the length prefix (4 bytes)
 
-# --- Game State Variables (Keep existing ones) ---
-white_pieces = ['rook', 'knight', 'bishop', 'king', 'queen', 'bishop', 'knight', 'rook',
-                'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn']
-white_locations = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0),
-                   (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1)]
-black_pieces = ['rook', 'knight', 'bishop', 'king', 'queen', 'bishop', 'knight', 'rook',
-                'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn']
-black_locations = [(0, 7), (1, 7), (2, 7), (3, 7), (4, 7), (5, 7), (6, 7), (7, 7),
-                   (0, 6), (1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6), (7, 6)]
-captured_pieces_white = []
-captured_pieces_black = []
-chat_history = []
-
-turn_step = 0
-winner = ''
-game_over = False
-game_started = False # <-- Flag to know when to start timers
-
-# --- Timer Variables ---
-white_time = INITIAL_TIME_SECONDS
-black_time = INITIAL_TIME_SECONDS
-last_timer_update = None # <-- Timestamp of the last update
-last_periodic_broadcast_time = 0 # <-- Timestamp for periodic broadcast control
-
-# --- Helper Functions (Keep existing check_... functions) ---
-def check_options(pieces, locations, turn_color):
-    # (Keep the original check_options function exactly as it is)
-    global white_locations, black_locations
+# --- Game Logic Helper Functions ---
+def check_options(pieces, locations, turn_color, white_locations_global, black_locations_global):
     moves_list = []
     all_moves_list = []
-    # Make copies to prevent modification during calculation if needed, though current check funcs don't modify
-    current_white_locations = white_locations[:]
-    current_black_locations = black_locations[:]
+    current_white_locations = white_locations_global
+    current_black_locations = black_locations_global
 
     for i in range(len(pieces)):
+        if not (0 <= i < len(locations)): continue # Safety check
         location = locations[i]
         piece = pieces[i]
-        # Basic validation to prevent errors if lists get mismatched temporarily
-        if not (0 <= i < len(locations)): continue
         if piece not in ['pawn', 'rook', 'knight', 'bishop', 'queen', 'king']: continue
 
+        w_locs_context = current_white_locations
+        b_locs_context = current_black_locations
+
         if piece == 'pawn':
-            moves_list = check_pawn(location, turn_color, current_white_locations, current_black_locations)
+            moves_list = check_pawn(location, turn_color, w_locs_context, b_locs_context)
         elif piece == 'rook':
-            moves_list = check_rook(location, turn_color, current_white_locations, current_black_locations)
+            moves_list = check_rook(location, turn_color, w_locs_context, b_locs_context)
         elif piece == 'knight':
-            moves_list = check_knight(location, turn_color, current_white_locations, current_black_locations)
+            moves_list = check_knight(location, turn_color, w_locs_context, b_locs_context)
         elif piece == 'bishop':
-            moves_list = check_bishop(location, turn_color, current_white_locations, current_black_locations)
+            moves_list = check_bishop(location, turn_color, w_locs_context, b_locs_context)
         elif piece == 'queen':
-            moves_list = check_queen(location, turn_color, current_white_locations, current_black_locations)
+            moves_list = check_queen(location, turn_color, w_locs_context, b_locs_context)
         elif piece == 'king':
-            moves_list = check_king(location, turn_color, current_white_locations, current_black_locations)
+            moves_list = check_king(location, turn_color, w_locs_context, b_locs_context)
         all_moves_list.append(moves_list)
     return all_moves_list
 
 def check_pawn(position, color, w_locs, b_locs):
-    # (Keep the original check_pawn function exactly as it is)
     moves_list = []
     if color == 'white':
-        # Forward 1
         if (position[0], position[1] + 1) not in w_locs and \
            (position[0], position[1] + 1) not in b_locs and position[1] < 7:
             moves_list.append((position[0], position[1] + 1))
-        # Forward 2 (from starting row)
         if position[1] == 1 and \
            (position[0], position[1] + 1) not in w_locs and \
            (position[0], position[1] + 1) not in b_locs and \
            (position[0], position[1] + 2) not in w_locs and \
-           (position[0], position[1] + 2) not in b_locs and position[1] < 6: # Ensure not moving off board
+           (position[0], position[1] + 2) not in b_locs and position[1] < 6:
             moves_list.append((position[0], position[1] + 2))
-        # Diagonal capture
         if position[0] < 7 and position[1] < 7 and (position[0] + 1, position[1] + 1) in b_locs:
             moves_list.append((position[0] + 1, position[1] + 1))
         if position[0] > 0 and position[1] < 7 and (position[0] - 1, position[1] + 1) in b_locs:
             moves_list.append((position[0] - 1, position[1] + 1))
-        # Add En Passant later if needed
     else: # Black's turn
-        # Forward 1
         if (position[0], position[1] - 1) not in w_locs and \
            (position[0], position[1] - 1) not in b_locs and position[1] > 0:
             moves_list.append((position[0], position[1] - 1))
-        # Forward 2 (from starting row)
         if position[1] == 6 and \
            (position[0], position[1] - 1) not in w_locs and \
            (position[0], position[1] - 1) not in b_locs and \
            (position[0], position[1] - 2) not in w_locs and \
-           (position[0], position[1] - 2) not in b_locs and position[1] > 1: # Ensure not moving off board
+           (position[0], position[1] - 2) not in b_locs and position[1] > 1:
             moves_list.append((position[0], position[1] - 2))
-        # Diagonal capture
         if position[0] < 7 and position[1] > 0 and (position[0] + 1, position[1] - 1) in w_locs:
             moves_list.append((position[0] + 1, position[1] - 1))
         if position[0] > 0 and position[1] > 0 and (position[0] - 1, position[1] - 1) in w_locs:
             moves_list.append((position[0] - 1, position[1] - 1))
-        # Add En Passant later if needed
     return moves_list
-
 
 def check_rook(position, color, w_locs, b_locs):
-    # (Keep the original check_rook function exactly as it is)
     moves_list = []
     friends_list = w_locs if color == 'white' else b_locs
     enemies_list = b_locs if color == 'white' else w_locs
-    directions = [(0, 1), (0, -1), (1, 0), (-1, 0)] # Up, Down, Right, Left
-    for dx, dy in directions:
-        for i in range(1, 8): # Max 7 steps in any direction
-            target_x, target_y = position[0] + i * dx, position[1] + i * dy
-            target_coords = (target_x, target_y)
-            if 0 <= target_x <= 7 and 0 <= target_y <= 7: # Check if on board
-                if target_coords not in friends_list:
-                    moves_list.append(target_coords)
-                    if target_coords in enemies_list: # Path blocked by enemy capture
-                        break # Stop checking further in this direction
-                else: # Path blocked by friend
-                    break # Stop checking further in this direction
-            else: # Off board
-                break # Stop checking further in this direction
-    return moves_list
-
-
-def check_knight(position, color, w_locs, b_locs):
-    # (Keep the original check_knight function exactly as it is)
-    moves_list = []
-    friends_list = w_locs if color == 'white' else b_locs
-    targets = [(1, 2), (1, -2), (2, 1), (2, -1),
-               (-1, 2), (-1, -2), (-2, 1), (-2, -1)]
-    for dx, dy in targets:
-        target_x, target_y = position[0] + dx, position[1] + dy
-        target_coords = (target_x, target_y)
-        if 0 <= target_x <= 7 and 0 <= target_y <= 7:
-            if target_coords not in friends_list:
-                moves_list.append(target_coords)
-    return moves_list
-
-
-def check_bishop(position, color, w_locs, b_locs):
-    # (Keep the original check_bishop function exactly as it is)
-    moves_list = []
-    friends_list = w_locs if color == 'white' else b_locs
-    enemies_list = b_locs if color == 'white' else w_locs
-    directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)] # Diagonal directions
+    directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
     for dx, dy in directions:
         for i in range(1, 8):
             target_x, target_y = position[0] + i * dx, position[1] + i * dy
             target_coords = (target_x, target_y)
-            if 0 <= target_x <= 7 and 0 <= target_y <= 7: # On board
+            if 0 <= target_x <= 7 and 0 <= target_y <= 7:
                 if target_coords not in friends_list:
                     moves_list.append(target_coords)
-                    if target_coords in enemies_list: # Path blocked by enemy capture
-                        break
-                else: # Path blocked by friend
-                    break
-            else: # Off board
-                break
+                    if target_coords in enemies_list: break
+                else: break
+            else: break
     return moves_list
 
-
-def check_queen(position, color, w_locs, b_locs):
-    # (Keep the original check_queen function exactly as it is)
-    moves_list = check_bishop(position, color, w_locs, b_locs)
-    moves_list.extend(check_rook(position, color, w_locs, b_locs))
-    return moves_list
-
-
-def check_king(position, color, w_locs, b_locs):
-    # (Keep the original check_king function exactly as it is)
+def check_knight(position, color, w_locs, b_locs):
     moves_list = []
     friends_list = w_locs if color == 'white' else b_locs
-    targets = [(1, 0), (1, 1), (1, -1), (-1, 0),
-               (-1, 1), (-1, -1), (0, 1), (0, -1)]
+    targets = [(1, 2), (1, -2), (2, 1), (2, -1), (-1, 2), (-1, -2), (-2, 1), (-2, -1)]
     for dx, dy in targets:
         target_x, target_y = position[0] + dx, position[1] + dy
         target_coords = (target_x, target_y)
         if 0 <= target_x <= 7 and 0 <= target_y <= 7:
             if target_coords not in friends_list:
                 moves_list.append(target_coords)
-    # Basic Castling Check Placeholder (Needs check validation)
-    # if color == 'white' and position == (4, 0): # and king/rooks haven't moved
-    #     if (5,0) not in w_locs and (6,0) not in w_locs and (7,0) in w_locs: moves_list.append((6,0)) # Kingside
-    #     if (3,0) not in w_locs and (2,0) not in w_locs and (1,0) not in w_locs and (0,0) in w_locs: moves_list.append((2,0)) # Queenside
-    # elif color == 'black' and position == (4, 7): # and king/rooks haven't moved
-    #     if (5,7) not in b_locs and (6,7) not in b_locs and (7,7) in b_locs: moves_list.append((6,7)) # Kingside
-    #     if (3,7) not in b_locs and (2,7) not in b_locs and (1,7) not in b_locs and (0,7) in b_locs: moves_list.append((2,7)) # Queenside
+    return moves_list
+
+def check_bishop(position, color, w_locs, b_locs):
+    moves_list = []
+    friends_list = w_locs if color == 'white' else b_locs
+    enemies_list = b_locs if color == 'white' else w_locs
+    directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+    for dx, dy in directions:
+        for i in range(1, 8):
+            target_x, target_y = position[0] + i * dx, position[1] + i * dy
+            target_coords = (target_x, target_y)
+            if 0 <= target_x <= 7 and 0 <= target_y <= 7:
+                if target_coords not in friends_list:
+                    moves_list.append(target_coords)
+                    if target_coords in enemies_list: break
+                else: break
+            else: break
+    return moves_list
+
+def check_queen(position, color, w_locs, b_locs):
+    moves_list = check_bishop(position, color, w_locs, b_locs)
+    moves_list.extend(check_rook(position, color, w_locs, b_locs))
+    return moves_list
+
+def check_king(position, color, w_locs, b_locs):
+    moves_list = []
+    friends_list = w_locs if color == 'white' else b_locs
+    targets = [(1, 0), (1, 1), (1, -1), (-1, 0), (-1, 1), (-1, -1), (0, 1), (0, -1)]
+    for dx, dy in targets:
+        target_x, target_y = position[0] + dx, position[1] + dy
+        target_coords = (target_x, target_y)
+        if 0 <= target_x <= 7 and 0 <= target_y <= 7:
+            if target_coords not in friends_list:
+                moves_list.append(target_coords)
+    # Add check validation and castling later
     return moves_list
 
 
-# --- Networking Setup ---
-SERVER_IP = '0.0.0.0'
-PORT = 5555
-MAX_PLAYERS = 2
+# --- Game Class ---
+class Game:
+    def __init__(self, game_id):
+        self.game_id = game_id
+        self.players = {} # {conn: 'white'/'black', conn2: 'black'/'white'}
+        self.player_conns = {'white': None, 'black': None}
+        self.white_pieces = []
+        self.white_locations = []
+        self.black_pieces = []
+        self.black_locations = []
+        self.captured_pieces_white = []
+        self.captured_pieces_black = []
+        self.chat_history = []
+        self.turn_step = 0 # 0,1: White; 2,3: Black
+        self.winner = ''
+        self.game_over = False
+        self.game_started = False
+        self.white_time = INITIAL_TIME_SECONDS
+        self.black_time = INITIAL_TIME_SECONDS
+        self.last_timer_update = None
+        self.white_options = []
+        self.black_options = []
+        self.game_state_lock = threading.Lock()
+        self._initialize_board()
+        print(f"Game {self.game_id}: Initialized.")
 
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    def _initialize_board(self):
+        # Called within lock during __init__
+        self.white_pieces = ['rook', 'knight', 'bishop', 'king', 'queen', 'bishop', 'knight', 'rook',
+                        'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn']
+        self.white_locations = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0),
+                           (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1)]
+        self.black_pieces = ['rook', 'knight', 'bishop', 'king', 'queen', 'bishop', 'knight', 'rook',
+                        'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn', 'pawn']
+        self.black_locations = [(0, 7), (1, 7), (2, 7), (3, 7), (4, 7), (5, 7), (6, 7), (7, 7),
+                           (0, 6), (1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6), (7, 6)]
+        self.captured_pieces_white = []
+        self.captured_pieces_black = []
+        self.chat_history = []
+        self.turn_step = 0
+        self.winner = ''
+        self.game_over = False
+        self.game_started = False
+        self.white_time = INITIAL_TIME_SECONDS
+        self.black_time = INITIAL_TIME_SECONDS
+        self.last_timer_update = None
+        self.white_options = check_options(self.white_pieces, self.white_locations, 'white', self.white_locations, self.black_locations)
+        self.black_options = check_options(self.black_pieces, self.black_locations, 'black', self.white_locations, self.black_locations)
 
-try:
-    server_socket.bind((SERVER_IP, PORT))
-except socket.error as e:
-    print(f"Socket bind error: {e}")
-    exit()
+    def add_player(self, conn, color):
+        # Called within pairing_lock or game's lock context usually
+        if color not in self.player_conns or self.player_conns[color] is None:
+            self.players[conn] = color
+            self.player_conns[color] = conn
+            peer = "unknown"
+            try: peer = conn.getpeername()
+            except: pass
+            print(f"Game {self.game_id}: Player {color} assigned to {peer}")
+            return True
+        else:
+            print(f"Game {self.game_id}: Error - Color {color} already assigned.")
+            return False
 
-server_socket.listen(MAX_PLAYERS)
-print("Chess Server Started. Waiting for connections...")
-
-clients = []
-player_assignments = {}
-game_state_lock = threading.Lock() # Keep using the lock
-
-# Calculate initial options (can be done once at start)
-white_options = check_options(white_pieces, white_locations, 'white')
-black_options = check_options(black_pieces, black_locations, 'black')
-
-def update_timers():
-    """Calculates elapsed time and updates player timers. Must be called within game_state_lock."""
-    global white_time, black_time, last_timer_update, game_over, winner, turn_step, game_started
-
-    if not game_started or game_over or last_timer_update is None:
-        return # Don't update timers if game hasn't started, is over, or first update hasn't happened
-
-    now = time.time()
-    elapsed = now - last_timer_update
-    timer_changed = False
-
-    # Only decrease time if elapsed > 0 to avoid issues on rapid calls
-    if elapsed > 0:
-        if turn_step < 2: # White's turn
-            white_time -= elapsed
-            timer_changed = True
-            if white_time <= 0:
-                white_time = 0
-                if not game_over: # Ensure game over logic runs only once
-                    winner = 'black'
-                    game_over = True
-                    print(f"Game Over! Black wins on time! (White: {white_time:.2f})")
-        else: # Black's turn
-            black_time -= elapsed
-            timer_changed = True
-            if black_time <= 0:
-                black_time = 0
-                if not game_over: # Ensure game over logic runs only once
-                    winner = 'white'
-                    game_over = True
-                    print(f"Game Over! White wins on time! (Black: {black_time:.2f})")
-
-    last_timer_update = now # Always update the timestamp for the next calculation
-    return timer_changed or game_over # Indicate if state relevant to broadcast changed
-
-
-def get_current_game_state():
-    """Returns the complete current game state. Assumes timers are updated just before or handled by periodic updates."""
-    global white_pieces, white_locations, black_pieces, black_locations
-    global captured_pieces_white, captured_pieces_black
-    global turn_step, game_over, winner, chat_history
-    global white_options, black_options # These should be updated after moves
-    global white_time, black_time
-
-    # NOTE: Timer updates are now primarily handled by the periodic update mechanism.
-    # This function now just reads the current state.
-    # Options are recalculated here for safety, ensuring the sent state is always consistent.
-    current_white_options = check_options(white_pieces, white_locations, 'white')
-    current_black_options = check_options(black_pieces, black_locations, 'black')
-
-    return {
-        'white_pieces': white_pieces[:], # Send copies
-        'white_locations': white_locations[:],
-        'black_pieces': black_pieces[:],
-        'black_locations': black_locations[:],
-        'captured_white': captured_pieces_white[:],
-        'captured_black': captured_pieces_black[:],
-        'turn_step': turn_step,
-        'game_over': game_over,
-        'winner': winner,
-        'white_options': current_white_options,
-        'black_options': current_black_options,
-        'chat_history': chat_history[:],
-        'white_time': white_time,
-        'black_time': black_time,
-        'game_started': game_started
-    }
-
-
-def broadcast_state():
-    """Sends the current game state to all connected clients."""
-    # Get state OUTSIDE the client loop to avoid recalculating/locking repeatedly
-    try:
-        state_data = pickle.dumps(get_current_game_state())
-    except Exception as e:
-        print(f"Error pickling game state: {e}")
-        return # Cannot broadcast if pickling fails
-
-    with game_state_lock: # Lock only needed for accessing the clients list safely
-        current_clients = clients[:] # Make a copy to iterate over
-
-    #print(f"Broadcasting state to {len(current_clients)} clients.") # Debug print
-    for client_conn in current_clients:
-        try:
-            client_conn.sendall(state_data)
-        except (socket.error, BrokenPipeError) as e:
-            print(f"Error sending state to client: {e}. Removing client.")
-            # Schedule removal outside the loop if needed, or handle carefully
-            # For simplicity, remove directly here, assuming `remove_client` is thread-safe enough
-            remove_client(client_conn)
-
-def remove_client(conn):
-    """Removes a client connection and handles associated cleanup. MUST handle being called potentially multiple times for the same conn."""
-    global game_started, last_timer_update, clients, player_assignments, game_over, winner
-    with game_state_lock:
-        if conn in clients:
-            clients.remove(conn)
-            disconnected_color = player_assignments.pop(conn, None) # Use pop with default
-
+    def remove_player(self, conn):
+        # Called within games_lock context usually
+        needs_broadcast = False
+        disconnected_color = None
+        with self.game_state_lock: # Need internal lock to modify player dicts/state
+            disconnected_color = self.players.pop(conn, None)
             if disconnected_color:
-                print(f"Player {disconnected_color} disconnected.")
-                # If a player disconnects during the game, the other player wins
-                if len(clients) == 1 and game_started and not game_over:
-                    remaining_conn = clients[0] # The only one left
-                    remaining_color = player_assignments.get(remaining_conn)
-                    winner = remaining_color # The remaining player wins
-                    game_over = True
-                    print(f"Game Over! {winner.capitalize()} wins by opponent disconnection.")
-                    # Trigger a final broadcast to inform the winner
-                    needs_broadcast_on_disconnect = True
-                elif len(clients) < MAX_PLAYERS:
-                     print("Waiting for new players...")
-                     # Decide if game state should reset etc. For now, just waits.
-                     game_started = False # Stop timers etc.
-                     last_timer_update = None
-                     # Reset game state? Optional.
-                     # reset_game_state() # --> You would need to implement this function
-                     needs_broadcast_on_disconnect = True # Inform remaining player game stopped/waiting
-                else: # Both players still connected somehow? Should not happen often here.
-                    needs_broadcast_on_disconnect = False
+                print(f"Game {self.game_id}: Player {disconnected_color} removed internally.")
+                self.player_conns[disconnected_color] = None
+                if self.game_started and not self.game_over:
+                    self.game_over = True
+                    self.winner = 'black' if disconnected_color == 'white' else 'white'
+                    print(f"Game {self.game_id}: Over! {self.winner.capitalize()} wins by opponent disconnection.")
+                    needs_broadcast = True
+                elif not self.game_started:
+                    print(f"Game {self.game_id}: Player left before start.")
+                    self.game_over = True # Mark as over to facilitate cleanup
             else:
-                print("Spectator or unassigned client disconnected.")
-                needs_broadcast_on_disconnect = False
+                # print(f"Game {self.game_id}: Conn not found in players list during removal.") # Reduce noise
+                pass
+        return needs_broadcast, disconnected_color
 
-            # Close the socket outside the lock if possible, though usually done in handle_client exit
-            try:
-                 conn.close()
-                 print(f"Socket for {disconnected_color or 'unknown'} closed.")
-            except (socket.error, AttributeError):
-                 pass # Ignore errors if already closed or invalid
+    def is_ready(self):
+        # Called within lock context usually
+        return self.player_conns.get('white') is not None and self.player_conns.get('black') is not None
 
-    # Perform broadcast outside the lock if needed after state changes
-    if needs_broadcast_on_disconnect:
-        # Small delay might be needed for client thread to potentially exit cleanly first
-        # time.sleep(0.1)
-        broadcast_state()
+    def start_game(self):
+        # Called within lock context usually
+        with self.game_state_lock:
+            if self.is_ready() and not self.game_started:
+                self.game_started = True
+                self.last_timer_update = time.time()
+                print(f"Game {self.game_id}: Started.")
+                return True
+            elif self.game_started:
+                print(f"Game {self.game_id}: Already started.")
+                return True # Idempotent?
+            else:
+                print(f"Game {self.game_id}: Cannot start, not ready.")
+                return False
+
+    def update_timers(self):
+        game_ended_by_time = False
+        with self.game_state_lock:
+            if not self.game_started or self.game_over or self.last_timer_update is None:
+                return False
+
+            now = time.time()
+            elapsed = now - self.last_timer_update
+            timer_changed = False
+
+            if elapsed > 0:
+                if self.turn_step < 2: # White's turn
+                    self.white_time -= elapsed
+                    timer_changed = True
+                    if self.white_time <= 0:
+                        self.white_time = 0
+                        if not self.game_over:
+                            self.winner = 'black'
+                            self.game_over = True
+                            game_ended_by_time = True
+                            print(f"Game {self.game_id}: Over! Black wins on time!")
+                else: # Black's turn
+                    self.black_time -= elapsed
+                    timer_changed = True
+                    if self.black_time <= 0:
+                        self.black_time = 0
+                        if not self.game_over:
+                            self.winner = 'white'
+                            self.game_over = True
+                            game_ended_by_time = True
+                            print(f"Game {self.game_id}: Over! White wins on time!")
+
+            self.last_timer_update = now # Update timestamp regardless
+        return game_ended_by_time
+
+    def apply_move(self, player_color, selection_index, target_coords):
+        with self.game_state_lock:
+            if self.game_over: return False
+
+            is_white_turn = (self.turn_step < 2)
+            active_player_color = 'white' if is_white_turn else 'black'
+
+            if player_color != active_player_color:
+                print(f"Game {self.game_id}: Invalid move - Not {player_color}'s turn.")
+                return False
+
+            pieces_list = self.white_pieces if active_player_color == 'white' else self.black_pieces
+            locations_list = self.white_locations if active_player_color == 'white' else self.black_locations
+            # Use the *current* options stored in the game state
+            options_list = self.white_options if active_player_color == 'white' else self.black_options
+
+            valid_move_found = False
+            if 0 <= selection_index < len(pieces_list) and 0 <= selection_index < len(options_list):
+                 # Ensure options_list[selection_index] is actually a list of moves
+                 if isinstance(options_list[selection_index], list):
+                     piece_options = options_list[selection_index]
+                     if target_coords in piece_options:
+                         valid_move_found = True
+                     else:
+                         print(f"Game {self.game_id}: Invalid move {target_coords} for {active_player_color} piece index {selection_index}. Options: {piece_options}")
+                 else:
+                     print(f"Game {self.game_id}: Options for piece index {selection_index} is not a list: {options_list[selection_index]}")
+            else:
+                print(f"Game {self.game_id}: Invalid selection index {selection_index} for {active_player_color}. Piece count: {len(pieces_list)}, Options count: {len(options_list)}")
+
+
+            if not valid_move_found: return False
+
+            # Execute Move
+            print(f"Game {self.game_id}: Applying valid move for {active_player_color} from {locations_list[selection_index]} to {target_coords}")
+            self.last_timer_update = time.time()
+
+            # Capture Logic
+            opponent_color = 'black' if active_player_color == 'white' else 'white'
+            opponent_locations = self.black_locations if opponent_color == 'black' else self.white_locations
+            opponent_pieces = self.black_pieces if opponent_color == 'black' else self.white_pieces
+            captured_list = self.captured_pieces_white if active_player_color == 'white' else self.captured_pieces_black
+
+            if target_coords in opponent_locations:
+                try:
+                    opponent_piece_index = opponent_locations.index(target_coords)
+                    # Ensure indices align before popping
+                    if 0 <= opponent_piece_index < len(opponent_pieces):
+                         captured_piece = opponent_pieces.pop(opponent_piece_index)
+                         captured_list.append(captured_piece)
+                         opponent_locations.pop(opponent_piece_index) # Pop location *after* piece
+                         print(f"Game {self.game_id}: {active_player_color.capitalize()} captured {captured_piece}")
+                         if captured_piece == 'king':
+                             self.winner = active_player_color
+                             self.game_over = True
+                             print(f"Game {self.game_id}: Over! {self.winner.capitalize()} wins by capturing king!")
+                    else:
+                         print(f"Game {self.game_id}: Error - Opponent index mismatch during capture. Idx: {opponent_piece_index}, Len: {len(opponent_pieces)}")
+                except ValueError:
+                     print(f"Game {self.game_id}: Error - Target coords {target_coords} not found in opponent locations during capture.")
+
+
+            # Move Piece (ensure index is valid)
+            if 0 <= selection_index < len(locations_list):
+                 locations_list[selection_index] = target_coords
+            else:
+                 print(f"Game {self.game_id}: Error - selection_index {selection_index} out of bounds for locations_list (len {len(locations_list)}) during move.")
+                 return False # Abort move if index is bad
+
+            # Promotion
+            if 0 <= selection_index < len(pieces_list): # Check index again before accessing piece
+                 piece_moved = pieces_list[selection_index]
+                 promote_row = 7 if active_player_color == 'white' else 0
+                 if piece_moved == 'pawn' and target_coords[1] == promote_row:
+                     pieces_list[selection_index] = 'queen'
+                     print(f"Game {self.game_id}: {active_player_color.capitalize()} pawn promoted!")
+            else:
+                  print(f"Game {self.game_id}: Error - selection_index {selection_index} out of bounds for pieces_list (len {len(pieces_list)}) during promotion check.")
+
+
+            # Switch Turn
+            self.turn_step = (self.turn_step + 2) % 4
+
+            # Recalculate options
+            self.white_options = check_options(self.white_pieces, self.white_locations, 'white', self.white_locations, self.black_locations)
+            self.black_options = check_options(self.black_pieces, self.black_locations, 'black', self.white_locations, self.black_locations)
+
+            return True
+
+    def add_chat_message(self, sender_color, text, timestamp):
+        with self.game_state_lock:
+            if self.game_over: return False
+            chat_message = {'sender': sender_color, 'text': text, 'timestamp': timestamp}
+            self.chat_history.append(chat_message)
+            if len(self.chat_history) > 100:
+                self.chat_history.pop(0)
+            print(f"Game {self.game_id} Chat from {sender_color}: {text}")
+            return True
+
+    def get_state(self):
+        with self.game_state_lock:
+            return {
+                'game_id': self.game_id,
+                'white_pieces': self.white_pieces[:],
+                'white_locations': self.white_locations[:],
+                'black_pieces': self.black_pieces[:],
+                'black_locations': self.black_locations[:],
+                'captured_white': self.captured_pieces_white[:],
+                'captured_black': self.captured_pieces_black[:],
+                'turn_step': self.turn_step,
+                'game_over': self.game_over,
+                'winner': self.winner,
+                'white_options': self.white_options[:], # Shallow copy options lists
+                'black_options': self.black_options[:],
+                'chat_history': self.chat_history[:],
+                'white_time': self.white_time,
+                'black_time': self.black_time,
+                'game_started': self.game_started
+            }
+
+    def get_player_connections(self):
+        with self.game_state_lock:
+            # Return only non-None connections
+            return [conn for conn in self.players.keys() if conn and conn.fileno() != -1]
+
+
+# --- Server Globals ---
+games = {} # {game_id: Game_instance}
+waiting_players = {} # {conn: addr}
+client_to_game = {} # {conn: game_id}
+server_socket = None
+pairing_lock = threading.Lock()
+games_lock = threading.Lock()
+last_periodic_broadcast_time = 0
+
+# --- Server Functions ---
+
+def send_framed_message(sock, message_obj):
+    """Serializes message object, prefixes with length, and sends."""
+    try:
+        pickled_data = pickle.dumps(message_obj)
+        message_length = len(pickled_data)
+        length_prefix = struct.pack('>I', message_length)
+        sock.sendall(length_prefix + pickled_data)
+        return True
+    except (socket.error, BrokenPipeError, pickle.PicklingError, struct.error, AttributeError) as e:
+        # AttributeError can happen if sock is already closed/invalid
+        # print(f"Error sending framed message: {e}") # Reduce noise
+        return False
+    except Exception as e:
+        print(f"Unexpected error in send_framed_message: {e}")
+        return False
+
+
+def broadcast_game_state(game_id):
+    """Sends the state of a specific game to its participants using framing."""
+    global games
+    game = None
+    with games_lock:
+        game = games.get(game_id)
+        if not game: return
+
+    try:
+        state_dict = game.get_state()
+        player_conns = game.get_player_connections() # Needs internal lock
+    except Exception as e:
+        print(f"Error getting state/conns for game {game_id} (broadcast): {e}")
+        return
+
+    if not player_conns: return
+
+    disconnected_during_broadcast = []
+    for conn in player_conns:
+        if not send_framed_message(conn, state_dict):
+            peer = "unknown"
+            try: peer = conn.getpeername()
+            except: pass
+            print(f"Failed to send state to client {peer} in game {game_id}. Marking for removal.")
+            disconnected_during_broadcast.append(conn)
+
+    for conn_to_remove in disconnected_during_broadcast:
+        with games_lock:
+             if game_id in games: # Check game still exists
+                  remove_client_from_game(conn_to_remove, game_id) # remove_client needs games_lock
+
+
+def remove_client_from_game(conn, game_id):
+    """Handles removing a client, updating game state, and cleaning up mappings."""
+    global games, client_to_game
+    # Assumes games_lock is held externally when called
+
+    game_ended_by_disconnect = False
+    disconnected_color = None
+    game_exists_during_removal = False
+
+    # 1. Remove from client_to_game mapping (needs separate lock)
+    with pairing_lock:
+        client_to_game.pop(conn, None)
+
+    # 2. Remove player from the Game object (games_lock is already held)
+    game = games.get(game_id)
+    if game:
+        game_exists_during_removal = True
+        needs_broadcast, disconnected_color = game.remove_player(conn) # Needs internal lock
+        if needs_broadcast:
+            game_ended_by_disconnect = True
+
+        player_conns_after_remove = game.get_player_connections() # Needs internal lock
+        if not player_conns_after_remove or game.game_over:
+             print(f"Game {game_id} is now empty or over. Removing from active games.")
+             games.pop(game_id, None) # Remove game instance
+             game_exists_during_removal = False
+    # else: Game already removed
+
+    # 3. Close the connection (outside locks if possible, but difficult here)
+    peername = "unknown"
+    try: peername = conn.getpeername()
+    except: pass
+    try:
+        conn.close()
+        print(f"Closed connection for {disconnected_color or 'unknown'} from {peername} (Game: {game_id})")
+    except (socket.error, OSError): pass
+
+    # 4. Broadcast final state (outside lock if was possible, but difficult)
+    # If we broadcast here, it must be done carefully to avoid deadlock if broadcast calls remove_client again
+    # For now, rely on the next periodic update or calling function to handle broadcast if needed.
+    # if game_ended_by_disconnect and game_exists_during_removal:
+    #    print(f"Triggering final broadcast for game {game_id} due to disconnect.")
+    #    # Potential issue: broadcast_game_state might try to re-acquire games_lock
+    #    # Consider scheduling broadcast outside the lock.
 
 
 def handle_client(conn, addr):
-    """Handles communication with a single client."""
-    global turn_step, game_over, winner
-    global white_pieces, white_locations, black_pieces, black_locations
-    global captured_pieces_white, captured_pieces_black, chat_history
-    global white_options, black_options, last_timer_update, game_started # Make sure all globals are accessible
+    """Handles initial setup and finds/assigns client to a game."""
+    global waiting_players, games, client_to_game
+    print(f"Handling connection from {addr}")
+    assigned_game_id = None
+    player_color = None
+    initial_send_failed = False
 
-    player_color = "Unknown" # Default
     try:
-        with game_state_lock:
-            player_color = player_assignments.get(conn, "Unknown")
-            print(f"Player {player_color} assigned to connection from {addr}")
+        with pairing_lock:
+            if waiting_players:
+                # Pair found!
+                wait_conn, wait_addr = waiting_players.popitem()
+                print(f"Pairing {addr} with waiting player {wait_addr}")
 
-        # Send initial color assignment
-        conn.sendall(pickle.dumps(player_color))
+                game_id = str(uuid.uuid4())
+                new_game = Game(game_id)
 
-        # Send initial game state (timers will be full initially, handled by periodic updates)
-        # The initial state broadcast might happen via the periodic update or the connection of the second player
-        # Send immediately for this client though
-        initial_state_data = pickle.dumps(get_current_game_state())
-        conn.sendall(initial_state_data)
+                # Assign players and add to game object (needs internal game lock)
+                with new_game.game_state_lock:
+                    add_ok_1 = new_game.add_player(wait_conn, 'white')
+                    add_ok_2 = new_game.add_player(conn, 'black')
 
-    except (socket.error, pickle.PicklingError, BrokenPipeError) as e:
-        print(f"Error during initial setup for {addr}: {e}")
-        remove_client(conn)
-        return
+                if not (add_ok_1 and add_ok_2):
+                     print(f"Error adding players to game {game_id}.")
+                     # Cleanup
+                     try: wait_conn.close()
+                     except: pass
+                     try: conn.close()
+                     except: pass
+                     return # Exit thread
 
+                # Update mappings
+                client_to_game[wait_conn] = game_id
+                client_to_game[conn] = game_id
+
+                with games_lock:
+                    games[game_id] = new_game
+                    print(f"Game {game_id} created.")
+
+                assigned_game_id = game_id
+                player_color = 'black'
+
+                # Start game (needs internal game lock)
+                game_started_ok = new_game.start_game()
+
+                # Send color assignments using framing
+                if not send_framed_message(wait_conn, 'white'): initial_send_failed = True
+                if not send_framed_message(conn, 'black'): initial_send_failed = True
+
+                if initial_send_failed:
+                    print(f"Error sending initial assignments for game {game_id}.")
+                    # Enhanced cleanup
+                    client_to_game.pop(wait_conn, None)
+                    client_to_game.pop(conn, None)
+                    with games_lock: games.pop(game_id, None)
+                    try: wait_conn.close()
+                    except: pass
+                    try: conn.close()
+                    except: pass
+                    return # Exit thread
+                else:
+                     # Initial broadcast (safe to call here)
+                     print(f"Broadcasting initial state for game {game_id}")
+                     broadcast_game_state(game_id)
+
+            else:
+                # Add to waiting queue
+                waiting_players[conn] = addr
+                print(f"Added {addr} to waiting queue.")
+                # Optionally send waiting status
+                # send_framed_message(conn, {"status": "waiting"})
+
+        # --- Continue to communication loop ---
+        if initial_send_failed: return
+
+        if assigned_game_id and player_color:
+            run_game_communication(conn, addr, assigned_game_id, player_color)
+        elif conn in waiting_players: # Check if still waiting
+            run_game_communication(conn, addr, None, None) # Loop handles waiting state
+        # else: Pairing failed, already cleaned up
+
+    except Exception as e:
+        print(f"Unexpected error during client handling/pairing for {addr}: {e}")
+        import traceback
+        traceback.print_exc()
+        # General cleanup
+        with pairing_lock:
+            waiting_players.pop(conn, None)
+        final_game_id = None
+        with pairing_lock: final_game_id = client_to_game.get(conn)
+        if final_game_id:
+             with games_lock: remove_client_from_game(conn, final_game_id)
+        else:
+             try:
+                 if conn and conn.fileno() != -1: conn.close()
+             except: pass
+
+
+def run_game_communication(conn, addr, initial_game_id, initial_player_color):
+    """Handles receiving messages from a client and interacting with their game."""
+    global client_to_game, games
+    current_game_id = initial_game_id
+    player_color = initial_player_color
     buffer = b""
+
     while True:
         try:
-            # Use non-blocking recv with timeout or select for better handling?
-            # For simplicity, stick to blocking recv for now.
-            chunk = conn.recv(4096 * 2) # Slightly larger buffer
+            chunk = conn.recv(4096)
             if not chunk:
-                print(f"Client {player_color} ({addr}) disconnected (empty data).")
-                remove_client(conn)
+                print(f"Client {addr} (Color: {player_color}, Game: {current_game_id}) disconnected (empty data).")
                 break
 
             buffer += chunk
 
-            # Process potential multiple messages in buffer (simple framing assumption)
-            while True:
+            while True: # Process buffer for simple pickle
                 try:
-                    message, buffer = pickle.loads(buffer), b'' # Assume one message per buffer for now
-                    # Proper framing needed for robustness: length prefix or delimiter
+                    message, buffer = pickle.loads(buffer), b''
+                except (pickle.UnpicklingError, EOFError, IndexError, TypeError, ValueError):
+                    break # Need more data
 
-                    if not isinstance(message, dict) or 'type' not in message:
-                        print(f"Invalid message format from {player_color}: {message}")
-                        continue # Skip invalid message
+                # Get current game ID for this client
+                with pairing_lock:
+                    current_game_id = client_to_game.get(conn)
 
-                    message_type = message['type']
-                    message_data = message.get('data') # Use .get for safety
-                    needs_broadcast = False # Flag to check if state needs update
+                if not current_game_id: continue # Still waiting
 
-                    # --- Acquire lock only when modifying shared state ---
-                    with game_state_lock:
-                        current_player_color_locked = player_assignments.get(conn) # Re-check assignment
-                        if not current_player_color_locked or current_player_color_locked == "Unknown":
-                            print(f"Ignoring message from unassigned/disconnected client {addr}")
-                            # Maybe force disconnect here?
-                            needs_broadcast = False
-                            continue # Skip processing
+                # Get game instance
+                game = None
+                with games_lock:
+                    game = games.get(current_game_id)
 
+                if not game: break # Game ended/removed while processing
 
-                        # --- Handle MOVE ---
-                        if message_type == 'move':
-                            if game_over:
-                                print("Game is over, ignoring move.")
-                                continue
-
-                            is_white_turn = (turn_step < 2)
-                            active_player_color = 'white' if is_white_turn else 'black'
-
-                            if current_player_color_locked != active_player_color:
-                                print(f"Invalid move: Not {current_player_color_locked}'s turn (It's {active_player_color}'s turn).")
-                                continue # Ignore the move
-
-                            # --- Move Validation ---
-                            if not isinstance(message_data, (list, tuple)) or len(message_data) != 2:
-                                print(f"Invalid move data format: {message_data}")
-                                continue
-
-                            selection_index, target_coords = message_data
-
-                            # Ensure target_coords is a tuple of two integers
-                            if not isinstance(target_coords, (list, tuple)) or len(target_coords) != 2 or \
-                               not all(isinstance(c, int) for c in target_coords):
-                                print(f"Invalid target coordinates format: {target_coords}")
-                                continue
-
-                            valid_move_found = False
-                            pieces_list = white_pieces if active_player_color == 'white' else black_pieces
-                            locations_list = white_locations if active_player_color == 'white' else black_locations
-
-                            # Re-calculate options inside the lock just before validating
-                            current_options = check_options(pieces_list, locations_list, active_player_color)
-
-                            if 0 <= selection_index < len(pieces_list) and 0 <= selection_index < len(current_options):
-                                piece_options = current_options[selection_index]
-                                if target_coords in piece_options:
-                                    valid_move_found = True
-                                else:
-                                    print(f"Invalid move: {target_coords} not in options {piece_options} for {active_player_color} piece {pieces_list[selection_index]} at index {selection_index}")
-                            else:
-                                print(f"Invalid selection index for {active_player_color}: {selection_index} (len={len(pieces_list)}, len_opts={len(current_options)})")
+                # Get player color within game context
+                # No lock needed if Game.players is read-only here, but safer with game lock
+                with game.game_state_lock:
+                     player_color = game.players.get(conn)
+                if not player_color: break # Should not happen if assigned
 
 
-                            # --- Execute Valid Move ---
-                            if valid_move_found:
-                                print(f"Executing valid move for {active_player_color}: piece {selection_index} to {target_coords}")
+                # Process Message
+                if not isinstance(message, dict) or 'type' not in message: continue
 
-                                # --- Timer handling: Reset timestamp for the *next* turn ---
-                                # The time used for the current turn is accounted for by elapsed time until this point.
-                                last_timer_update = time.time() # Reset timer start for the opponent
+                message_type = message['type']
+                message_data = message.get('data')
+                needs_broadcast = False
 
-                                # --- Piece Capture Logic ---
-                                opponent_color = 'black' if active_player_color == 'white' else 'white'
-                                opponent_locations = black_locations if opponent_color == 'black' else white_locations
-                                opponent_pieces = black_pieces if opponent_color == 'black' else white_pieces
-                                captured_list = captured_pieces_white if active_player_color == 'white' else captured_pieces_black
+                if message_type == 'move':
+                    if isinstance(message_data, (list, tuple)) and len(message_data) == 2:
+                         selection_index, target_coords = message_data
+                         if isinstance(target_coords, (list, tuple)) and len(target_coords) == 2 and \
+                            all(isinstance(c, int) for c in target_coords):
+                              # apply_move handles its own locking
+                              move_applied = game.apply_move(player_color, selection_index, target_coords)
+                              if move_applied: needs_broadcast = True
+                         # else: Invalid target coords format
+                    # else: Invalid move data format
 
-                                if target_coords in opponent_locations:
-                                    opponent_piece_index = opponent_locations.index(target_coords)
-                                    captured_piece = opponent_pieces.pop(opponent_piece_index)
-                                    captured_list.append(captured_piece)
-                                    opponent_locations.pop(opponent_piece_index)
-                                    print(f"{active_player_color.capitalize()} captured {captured_piece}")
-                                    if captured_piece == 'king':
-                                        winner = active_player_color
-                                        game_over = True
-                                        print(f"Game Over! {winner.capitalize()} wins by capturing king!")
+                elif message_type == 'chat':
+                    if isinstance(message_data, dict) and message_data.get('text'):
+                         timestamp = message_data.get('timestamp', datetime.now().strftime("%I:%M %p"))
+                         text = message_data['text']
+                         # add_chat_message handles its own locking
+                         chat_added = game.add_chat_message(player_color, text, timestamp)
+                         if chat_added: needs_broadcast = True
+                    # else: Invalid chat data format
 
-                                # --- Move the piece ---
-                                locations_list[selection_index] = target_coords
-
-                                # --- Pawn Promotion ---
-                                piece_moved = pieces_list[selection_index]
-                                promote_row = 7 if active_player_color == 'white' else 0
-                                if piece_moved == 'pawn' and target_coords[1] == promote_row:
-                                    pieces_list[selection_index] = 'queen' # Auto-promote to queen
-                                    print(f"{active_player_color.capitalize()} pawn promoted to Queen!")
-
-                                # --- Switch turn ---
-                                turn_step = (turn_step + 2) % 4 # Toggle between 0/1 (white) and 2/3 (black) phases
-
-                                # --- Update options for the next state (Important!) ---
-                                white_options = check_options(white_pieces, white_locations, 'white')
-                                black_options = check_options(black_pieces, black_locations, 'black')
-
-                                needs_broadcast = True # State changed
-
-                            else: # Move was invalid
-                                print(f"Move {message_data} from {current_player_color_locked} was invalid.")
-                                needs_broadcast = False # Don't broadcast on invalid move attempt
-
-                        # --- Handle CHAT ---
-                        elif message_type == 'chat':
-                            chat_message = message_data
-                            # Basic validation
-                            if isinstance(chat_message, dict) and \
-                               chat_message.get('sender') == current_player_color_locked and \
-                               chat_message.get('text'):
-
-                                # Ensure timestamp exists (client should add it ideally)
-                                if 'timestamp' not in chat_message:
-                                    chat_message['timestamp'] = datetime.now().strftime("%I:%M %p")
-
-                                chat_history.append(chat_message)
-                                # Limit chat history size
-                                if len(chat_history) > 100:
-                                    chat_history.pop(0)
-                                print(f"Chat from {current_player_color_locked}: {chat_message['text']}")
-                                needs_broadcast = True # Chat is a state change
-                            else:
-                                print(f"Invalid chat message format/sender from {current_player_color_locked}: {chat_message}")
-                                needs_broadcast = False
-
-                        # --- Add other message types if needed ---
-
-                    # --- End of lock scope ---
-
-                    # --- Broadcast state IF needed (outside the lock) ---
-                    if needs_broadcast:
-                        # print("Broadcasting state after event...") # Debug
-                        broadcast_state()
-
-                except (pickle.UnpicklingError, EOFError, IndexError, TypeError):
-                    # Not enough data in buffer for a complete message, break inner loop
-                    break
-                except Exception as e: # Catch unexpected errors during message processing
-                    print(f"Error processing message from {player_color}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    buffer = b'' # Clear buffer on error? Risky.
-                    # Consider disconnecting the client on processing errors
-                    # remove_client(conn)
-                    # break # Break inner loop
+                # Broadcast if needed
+                if needs_broadcast:
+                    broadcast_game_state(current_game_id)
 
         except (socket.error, ConnectionResetError, BrokenPipeError) as e:
-            print(f"Network error with client {player_color} ({addr}): {e}")
-            remove_client(conn)
+            print(f"Network error with client {addr} (Game: {current_game_id}): {e}")
             break
-        except Exception as e: # Catch broader exceptions in network loop
-            print(f"Unexpected error handling client {player_color} ({addr}): {e}")
+        except Exception as e:
+            print(f"Unexpected error processing data for client {addr} (Game: {current_game_id}): {e}")
             import traceback
             traceback.print_exc()
-            remove_client(conn)
             break
 
-    print(f"Client handler thread for {addr} finished.")
-    # Ensure socket is closed on thread exit, though remove_client might have done it
-    try:
-        conn.close()
-    except socket.error:
-        pass
+    # Cleanup
+    print(f"Communication loop finished for {addr}.")
+    final_game_id = None
+    with pairing_lock:
+        final_game_id = client_to_game.get(conn)
+        waiting_players.pop(conn, None)
 
-
-# --- Main Server Loop ---
-while True:
-    # --- Connection Acceptance Logic ---
-    if len(clients) < MAX_PLAYERS:
+    if final_game_id:
+        with games_lock: # Need lock to call remove_client
+             if final_game_id in games: # Check game exists before removal
+                  remove_client_from_game(conn, final_game_id)
+             else: # Game already gone, just close socket if needed
+                 try:
+                      if conn and conn.fileno() != -1: conn.close()
+                 except: pass
+    else:
+        # Was waiting or already removed
         try:
-            # Set a timeout for accept to allow periodic checks later if needed
-            server_socket.settimeout(0.5) # Timeout after 0.5 seconds
-            print(f"Waiting for player {len(clients) + 1}/{MAX_PLAYERS}...")
+            if conn and conn.fileno() != -1: conn.close()
+        except: pass
+
+
+def periodic_updates():
+    """Periodically updates timers for all active games and broadcasts."""
+    global games, last_periodic_broadcast_time
+    while True:
+        try:
+            start_time = time.time()
+            games_to_update = []
+            with games_lock: games_to_update = list(games.keys())
+
+            games_needing_broadcast = set()
+
+            for game_id in games_to_update:
+                game = None # Reset game var
+                with games_lock: # Need lock to safely get game instance
+                    game = games.get(game_id)
+                    if not game: continue # Skip if game was removed
+
+                # update_timers handles its own internal lock
+                game_ended_by_time = game.update_timers()
+                if game_ended_by_time:
+                    games_needing_broadcast.add(game_id)
+
+            current_time = time.time()
+            if current_time - last_periodic_broadcast_time >= BROADCAST_INTERVAL:
+                 for game_id in games_to_update:
+                      game = None
+                      with games_lock: game = games.get(game_id) # Check again if game exists
+                      # Broadcast state if game is active
+                      if game and game.game_started and not game.game_over:
+                           games_needing_broadcast.add(game_id)
+                 last_periodic_broadcast_time = current_time
+
+            if games_needing_broadcast:
+                 # print(f"Periodic: Broadcasting for {games_needing_broadcast}") # Debug
+                 for game_id in games_needing_broadcast:
+                      broadcast_game_state(game_id) # Handles its own locks internally
+
+            elapsed = time.time() - start_time
+            sleep_time = max(0.1, BROADCAST_INTERVAL - elapsed)
+            time.sleep(sleep_time)
+
+        except Exception as e:
+            print(f"!!! FATAL ERROR IN PERIODIC UPDATE THREAD: {e} !!!")
+            import traceback
+            traceback.print_exc()
+            time.sleep(5)
+
+
+# --- Main Server Execution ---
+if __name__ == "__main__":
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server_socket.bind((SERVER_IP, PORT))
+        server_socket.listen(MAX_PLAYERS_OVERALL)
+        print(f"Chess Server Started on {SERVER_IP}:{PORT}. Waiting for connections...")
+    except socket.error as e:
+        print(f"Socket bind/listen error: {e}")
+        exit()
+
+    update_thread = threading.Thread(target=periodic_updates, daemon=True)
+    update_thread.start()
+    print("Periodic timer update thread started.")
+
+    while True:
+        try:
             conn, addr = server_socket.accept()
-            print(f"Accepted connection from {addr}")
-            server_socket.settimeout(None) # Remove timeout after successful accept
-
-            with game_state_lock: # Lock before modifying shared client/assignment lists
-                if len(clients) < MAX_PLAYERS:
-                    clients.append(conn)
-                    player_id = 'white' if len(clients) == 1 else 'black'
-                    player_assignments[conn] = player_id
-                    print(f"Assigned color: {player_id} to {addr}")
-
-                    thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-                    thread.start()
-
-                    if len(clients) == MAX_PLAYERS:
-                        print("Both players connected. Starting game and timers.")
-                        game_started = True
-                        last_timer_update = time.time() # Initialize timer timestamp
-                        last_periodic_broadcast_time = time.time() # Init broadcast timestamp
-                        # Initial broadcast happens in handle_client now, or subsequent periodic one
-                else:
-                    # Server became full between check and accept? Rare but possible.
-                    print(f"Connection attempt from {addr} refused: Server full.")
-                    try:
-                        conn.sendall(pickle.dumps("error:server_full"))
-                    except socket.error as send_err:
-                        print(f"Could not send 'server_full' message: {send_err}")
-                    finally:
-                        conn.close()
-        except socket.timeout:
-            # No connection attempt within the timeout, just continue loop for periodic checks
-            pass
+            client_thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+            client_thread.start()
         except socket.error as e:
             print(f"Error accepting connection: {e}")
-            time.sleep(1) # Avoid busy-waiting on persistent accept error
-            continue
-        finally:
-            server_socket.settimeout(None) # Ensure timeout is removed if accept failed/timed out
-
-    # --- Periodic Timer Update and Broadcast ---
-    current_time = time.time()
-    # Check if game is active and enough time has passed since last *periodic* broadcast
-    if game_started and not game_over and \
-       (current_time - last_periodic_broadcast_time >= BROADCAST_INTERVAL):
-
-        state_changed_by_timer = False
-        with game_state_lock:
-            state_changed_by_timer = update_timers() # Update timers, check game over
-
-        # Broadcast if timer ticked or game ended on time
-        # Even if timer didn't change much, broadcast keeps clients synced
-        # print(f"Periodic check: game_started={game_started}, game_over={game_over}, state_changed={state_changed_by_timer}") # Debug
-        broadcast_state()
-        last_periodic_broadcast_time = current_time # Reset the periodic broadcast timer
-
-    # --- Small sleep to prevent busy-waiting in the main loop ---
-    # Especially important when the server is full and just doing periodic checks
-    time.sleep(0.1) # Sleep for 100ms
-
-# --- End of server (won't be reached in this loop structure) ---
-# server_socket.close() # Consider adding cleanup if the loop could exit
+            time.sleep(0.5) # Reduce busy wait on persistent error
+        except Exception as e:
+            print(f"Unexpected error in main accept loop: {e}")
+            time.sleep(0.5)
