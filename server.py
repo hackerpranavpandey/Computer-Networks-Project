@@ -6,7 +6,7 @@ import time # <-- Import time module
 from datetime import datetime # <-- Keep for chat timestamps
 
 # --- Constants ---
-INITIAL_TIME_SECONDS = 120.0 # 20 minutes * 60 seconds/minute
+INITIAL_TIME_SECONDS = 1200.0 # 20 minutes * 60 seconds/minute
 BROADCAST_INTERVAL = 1.0 # Seconds between state broadcasts for timer updates
 
 # --- Game State Variables (Keep existing ones) ---
